@@ -1,5 +1,5 @@
 const { launchBrowser } = require('../browser');
-const { isNew } = require('../storage');
+const { filterNew } = require('../storage');
 
 const SOURCE_KEY = 'crunchyroll-anime';
 const PAGE_URL = 'https://www.crunchyroll.com/ar/news/latest';
@@ -36,24 +36,35 @@ async function scrape() {
       const seen = new Set();
       const results = [];
 
-      // Collect all candidates first, then pick best per href
+      // Collect all candidates first, then pick best per href.
+      // Crunchyroll's card markup uses TWO separate <a> tags pointing at the
+      // same article — one wrapping just the thumbnail <img>, one wrapping
+      // just the title text — so reading img/title off a single anchor
+      // misses one or the other. Resolve both from the shared <article>
+      // container instead.
       const byHref = {};
       document.querySelectorAll('a[href*="/news/latest/"]').forEach((el) => {
         const href = el.getAttribute('href') || '';
         if (!re.test(href)) return;
 
+        const container = el.closest('article') || el.parentElement || el;
+
         const url = href.startsWith('http') ? href : baseUrl + href;
+        // Prefer an actual heading tag first — a generic [class*="title"]
+        // match can land on a wrapper div that also contains the tag/date
+        // row, pulling extra lines ("مانغا\nJUL 13…") into the title.
         const title =
-          el.querySelector('h1,h2,h3,h4,[class*="title"]')?.innerText?.trim() ||
+          container.querySelector('h1,h2,h3,h4')?.innerText?.trim() ||
+          container.querySelector('[class*="title"]')?.innerText?.trim() ||
           el.getAttribute('aria-label')?.trim() ||
           el.innerText?.trim()?.slice(0, 120) ||
           '';
         const img =
-          el.querySelector('img')?.src ||
-          el.querySelector('img')?.dataset?.src ||
+          container.querySelector('img')?.src ||
+          container.querySelector('img')?.dataset?.src ||
           '';
         const description =
-          el.querySelector('p,[class*="desc"],[class*="excerpt"]')?.innerText?.trim() || '';
+          container.querySelector('p,[class*="desc"],[class*="excerpt"]')?.innerText?.trim() || '';
 
         // Keep the candidate with the longest title for this href
         if (!byHref[href] || title.length > (byHref[href].title || '').length) {
@@ -68,11 +79,7 @@ async function scrape() {
       return results;
     }, BASE_URL, ARTICLE_RE.source);
 
-    for (const article of articles) {
-      if (isNew(SOURCE_KEY, article.url)) {
-        results.push(article);
-      }
-    }
+    results.push(...filterNew(SOURCE_KEY, articles, (a) => a.url));
 
     console.log(`[crunchyroll-anime] Browser found ${articles.length} article(s), ${results.length} new`);
   } catch (e) {

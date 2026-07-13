@@ -1,6 +1,6 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
-const { isNew } = require('../storage');
+const { filterNew } = require('../storage');
 
 const SOURCE_KEY = 'jistbuzz';
 const BASE_URL = 'https://www.jistbuzz.com';
@@ -41,13 +41,10 @@ async function scrape() {
     // Excerpt
     const description = article.find('.entry-content p, .entry-summary, .excerpt').first().text().trim();
 
-    const id = url;
-    if (!isNew(SOURCE_KEY, id)) return;
-
     results.push({ title, url, description, imageUrls: img ? [img] : [] });
   });
 
-  return results;
+  return filterNew(SOURCE_KEY, results, (r) => r.url);
 }
 
 module.exports = { scrape };
