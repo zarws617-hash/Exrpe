@@ -2,12 +2,12 @@ const axios = require('axios');
 const FormData = require('form-data');
 const fs = require('fs');
 const { fetchAndPrepareVideo } = require('./media');
+const { downloadImages } = require('./images');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const API_BASE = 'https://discord.com/api/v10';
 
-// Strip any bare URL from text so it can't collide with the markdown link
-// wrapper we add around the title (nested/duplicated links break rendering).
+// Strip bare URLs from text so they don't collide with markdown link wrappers.
 function stripUrls(text) {
   if (!text) return text;
   return text
@@ -20,7 +20,8 @@ function stripUrls(text) {
  * Sends a Discord Components V2 message to a channel using the bot token.
  *
  * @param {string} channelId
- * @param {object} payload - { title, url, description, imageUrls, videoUrl, authorName, authorUrl, authorAvatarUrl, color }
+ * @param {object} payload - { title, url, description, imageUrls, videoUrl,
+ *                            authorName, authorUrl, authorAvatarUrl, color }
  */
 async function sendNewsPost(channelId, payload) {
   const {
@@ -35,26 +36,36 @@ async function sendNewsPost(channelId, payload) {
     color = 0xf47521,
   } = payload;
 
-  const title = stripUrls(rawTitle) || rawTitle;
+  const title       = stripUrls(rawTitle) || rawTitle;
   const description = stripUrls(rawDescription);
 
   const truncatedDesc = description
-    ? description.length > 350
-      ? description.slice(0, 347) + '…'
+    ? description.length > 400
+      ? description.slice(0, 397) + '…'
       : description
     : null;
 
-  // If the tweet has a video, download it (compressing it under Discord's
-  // attachment limit if needed) so it can be uploaded and play inline.
+  // ── Download media ────────────────────────────────────────────────────────
+  // Video: compress to fit Discord's attachment limit if needed.
   let video = null;
   if (videoUrl) {
     video = await fetchAndPrepareVideo(videoUrl).catch(() => null);
   }
 
-  // Build inner components for the container
+  // Images: download with correct Referer headers so CDN hotlink checks pass.
+  // X post images (pbs.twimg.com) are public and Discord can embed them
+  // directly — skip download to keep X posts fast.
+  // For all other sources (Crunchyroll, Jistbuzz, ElCinema…) the CDN often
+  // blocks Discord's fetcher without a matching Referer, so we proxy them.
+  let downloadedImgs = [];
+  if (imageUrls.length > 0 && !video && !authorName) {
+    downloadedImgs = await downloadImages(imageUrls, 4);
+  }
+
+  // ── Build Components V2 inner components ─────────────────────────────────
   const innerComponents = [];
 
-  // Author section (for X posts) — shows the poster's own avatar
+  // Author section (X posts only)
   if (authorName) {
     const authorLine = authorUrl
       ? `**[${authorName}](${authorUrl})**`
@@ -75,98 +86,100 @@ async function sendNewsPost(channelId, payload) {
     innerComponents.push({ type: 14, divider: false, spacing: 1 });
   }
 
-  // Title + description as a Section with optional thumbnail
-  const textContent = [
-    url ? `### [${title}](${url})` : `### ${title}`,
-    truncatedDesc || '',
-  ]
+  // Title — always plain bold. The "اقرأ المزيد" / "عرض التغريدة" button at the
+  // bottom already carries the link; type-10 text components do not render
+  // [text](url) markdown as a hyperlink anyway, so the raw URL would show inline.
+  const titleLine = `**${title}**`;
+
+  const textContent = [titleLine, truncatedDesc || '']
     .filter(Boolean)
     .join('\n');
 
   innerComponents.push({ type: 10, content: textContent });
 
-  // Image(s) — always shown large via a media gallery, never as a small
-  // thumbnail accessory (a thumbnail is easy to miss and looks broken for
-  // what's meant to be the post's main visual).
-  if (imageUrls.length > 0 && !video) {
-    innerComponents.push({
-      type: 12,
-      items: imageUrls.slice(0, 10).map((imgUrl) => ({
-        media: { url: imgUrl },
-        description: title,
-      })),
-    });
+  // Images — prefer downloaded attachments (guaranteed to render), fall back
+  // to external URLs for X posts whose CDN is publicly accessible.
+  if (!video) {
+    if (downloadedImgs.length > 0) {
+      innerComponents.push({
+        type: 12,
+        items: downloadedImgs.map((img, i) => ({
+          media: { url: `attachment://image${i}.${img.ext}` },
+          description: title,
+        })),
+      });
+    } else if (imageUrls.length > 0) {
+      // X post images or fallback when download failed
+      innerComponents.push({
+        type: 12,
+        items: imageUrls.slice(0, 4).map((imgUrl) => ({
+          media: { url: imgUrl },
+          description: title,
+        })),
+      });
+    }
   }
 
-  // Video attachment — uploaded as a file and referenced via attachment://
-  const attachmentFilename = video ? `video-${Date.now()}.mp4` : null;
+  // Video attachment
+  const videoFilename = video ? `video-${Date.now()}.mp4` : null;
   if (video) {
     innerComponents.push({
       type: 12,
-      items: [
-        {
-          media: { url: `attachment://${attachmentFilename}` },
-          description: title,
-        },
-      ],
+      items: [{ media: { url: `attachment://${videoFilename}` }, description: title }],
     });
   }
 
-  // Separator
   innerComponents.push({ type: 14, divider: true, spacing: 1 });
 
-  // Link button
   if (url) {
     innerComponents.push({
       type: 1,
-      components: [
-        {
-          type: 2,
-          style: 5,
-          label: authorName ? 'عرض التغريدة' : 'اقرأ المزيد',
-          url,
-        },
-      ],
+      components: [{
+        type: 2,
+        style: 5,
+        label: authorName ? 'عرض التغريدة' : 'اقرأ المزيد',
+        url,
+      }],
     });
   }
 
   const body = {
     flags: 32768, // IS_COMPONENTS_V2
-    components: [
-      {
-        type: 17,
-        accent_color: color,
-        components: innerComponents,
-      },
-    ],
+    components: [{ type: 17, accent_color: color, components: innerComponents }],
   };
 
+  // ── Send ──────────────────────────────────────────────────────────────────
+  const hasFiles = video || downloadedImgs.length > 0;
+
   try {
-    if (video) {
+    if (hasFiles) {
       const form = new FormData();
       form.append('payload_json', JSON.stringify(body));
-      form.append('files[0]', fs.createReadStream(video.path), attachmentFilename);
+
+      let fileIdx = 0;
+      if (video) {
+        form.append(`files[${fileIdx++}]`, fs.createReadStream(video.path), videoFilename);
+      }
+      for (const img of downloadedImgs) {
+        const fname = `image${fileIdx - (video ? 1 : 0)}.${img.ext}`;
+        form.append(`files[${fileIdx++}]`, fs.createReadStream(img.path), fname);
+      }
 
       await axios.post(`${API_BASE}/channels/${channelId}/messages`, form, {
-        headers: {
-          ...form.getHeaders(),
-          Authorization: `Bot ${BOT_TOKEN}`,
-        },
+        headers: { ...form.getHeaders(), Authorization: `Bot ${BOT_TOKEN}` },
         timeout: 30000,
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
       });
     } else {
       await axios.post(`${API_BASE}/channels/${channelId}/messages`, body, {
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bot ${BOT_TOKEN}`,
-        },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bot ${BOT_TOKEN}` },
         timeout: 15000,
       });
     }
   } finally {
     if (video) video.cleanup();
+    downloadedImgs.forEach((img) => img.cleanup());
   }
 }
 

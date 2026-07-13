@@ -35,22 +35,34 @@ async function downloadVideo(url) {
 }
 
 /**
- * Downloads and muxes an HLS video (X now serves most tweet videos as
- * fragmented CMAF/DASH — the plain "*.mp4" URL seen on the wire is only a
- * tiny init segment, not the full file) using ffmpeg, which fetches every
- * segment from the .m3u8 playlist(s) itself. Video and audio are served as
- * separate playlists, so both are passed in and muxed together.
+ * Downloads and muxes an HLS video using ffmpeg.
+ *
+ * `isMaster=true`  → single input (master playlist); ffmpeg resolves the
+ *   EXT-X-MEDIA audio reference itself.  We map 0:v:0 and 0:a:0? (optional)
+ *   so a video-only master still works.
+ *
+ * `isMaster=false` → separate video + optional audio variant playlists;
+ *   mux explicitly with two inputs when audio is provided.
  */
-function downloadHlsVideo(videoM3u8, audioM3u8) {
+function downloadHlsVideo(videoM3u8, audioM3u8, { isMaster = false } = {}) {
   const dest = tmpFile('mp4');
   const args = ['-y'];
   args.push('-headers', BROWSER_HEADERS, '-i', videoM3u8);
-  if (audioM3u8) args.push('-headers', BROWSER_HEADERS, '-i', audioM3u8);
-  if (audioM3u8) {
+
+  if (!isMaster && audioM3u8) {
+    // Two explicit variant playlists — mux together
+    args.push('-headers', BROWSER_HEADERS, '-i', audioM3u8);
     args.push('-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac');
+  } else if (isMaster) {
+    // Master playlist: let ffmpeg auto-select the highest-bandwidth video variant
+    // and the matching audio track from EXT-X-MEDIA. Explicit -map would lock us
+    // to stream index 0 which is often the lowest-quality variant.
+    args.push('-c:v', 'copy', '-c:a', 'aac');
   } else {
-    args.push('-c', 'copy');
+    // Single video variant, no separate audio (optional audio in same stream)
+    args.push('-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'copy', '-c:a', 'aac');
   }
+
   args.push('-movflags', '+faststart', dest);
 
   const res = spawnSync('ffmpeg', args, { encoding: 'utf-8', timeout: DOWNLOAD_TIMEOUT });
@@ -125,8 +137,11 @@ function compressToTarget(srcPath, maxBytes) {
  * Returns { path, cleanup } or null if the video couldn't be fetched
  * or squeezed under the size limit.
  *
- * `source` is either a plain progressive video URL (string) or
- * `{ video, audio }` HLS playlist URLs to download+mux via ffmpeg.
+ * `source` is either:
+ *   - a plain URL string  → progressive MP4 (GIF-type tweet_video)
+ *   - { video, audio, isMaster }  → HLS; isMaster=true means single master
+ *     playlist that embeds the audio reference; isMaster=false means separate
+ *     video/audio variant playlists that must be muxed explicitly.
  */
 async function fetchAndPrepareVideo(source, maxBytes = MAX_BYTES) {
   let rawPath;
@@ -134,7 +149,7 @@ async function fetchAndPrepareVideo(source, maxBytes = MAX_BYTES) {
     rawPath =
       typeof source === 'string'
         ? await downloadVideo(source)
-        : downloadHlsVideo(source.video, source.audio);
+        : downloadHlsVideo(source.video, source.audio, { isMaster: source.isMaster });
   } catch {
     return null;
   }
