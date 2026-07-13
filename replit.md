@@ -54,3 +54,10 @@ WEBHOOK_ELCINEMA=https://discord.com/api/webhooks/...
 - Use Discord webhooks (no bot token) instead of a traditional bot
 - Scrape X publicly via Nitter RSS (no X credentials)
 - Discord Components V2 design for all posts
+
+## X (Twitter) scraper notes
+
+- `src/scrapers/x-account.js` loads `x.com/<username>` directly in headless Chromium (not Nitter, despite the table above — the code scrapes the live site's DOM).
+- Tweet text lines that are bare URLs (link-preview cards, self-quoted permalinks) are filtered out before building the title/description, and `src/discord.js` also strips any leftover bare URL from the title as a safety net — otherwise a URL duplicated inside the markdown `[title](url)` wrapper breaks Discord's rendering.
+- Only images under `pbs.twimg.com/media/` are treated as tweet photos; `profile_images` URLs are extracted separately as `authorAvatarUrl` and shown next to the author name instead of being posted as tweet media.
+- Video: request interception captures `video*.twimg.com/*.mp4` URLs off the wire and best-effort matches them (in DOM order) to tweets containing a `<video>` element. `src/media.js` downloads the video and, if over Discord's 10MB attachment limit, re-encodes it with ffmpeg at shrinking resolution/bitrate until it fits, then `discord.js` uploads it as a real attachment (required for Discord to render it as an inline playable video — external CDN links do not auto-embed).
