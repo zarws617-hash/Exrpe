@@ -1,0 +1,31 @@
+{pkgs}: {
+  deps = [
+    pkgs.chromium
+    pkgs.libdrm
+    pkgs.dbus
+    pkgs.mesa
+    pkgs.alsa-lib
+    pkgs.xorg.libXtst
+    pkgs.xorg.libXrender
+    pkgs.xorg.libXrandr
+    pkgs.xorg.libXi
+    pkgs.xorg.libXfixes
+    pkgs.xorg.libXext
+    pkgs.xorg.libXdamage
+    pkgs.xorg.libXcursor
+    pkgs.xorg.libXcomposite
+    pkgs.xorg.libxcb
+    pkgs.xorg.libX11
+    pkgs.pango
+    pkgs.cairo
+    pkgs.libpng
+    pkgs.expat
+    pkgs.cups
+    pkgs.at-spi2-atk
+    pkgs.atk
+    pkgs.nspr
+    pkgs.nss
+    pkgs.glib
+    pkgs.unzip
+  ];
+}
