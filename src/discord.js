@@ -1,6 +1,6 @@
 const axios = require('axios');
 
-const BOT_TOKEN = '4OTk3MDk4MzYzNzEyMw.GtfESh.tMzXsdXHqsCS7C4RXQ0qyvw8Jn6xcqrYE2P6vM';
+const BOT_TOKEN = process.env.BOT_TOKEN;
 const API_BASE = 'https://discord.com/api/v10';
 
 /**
