@@ -34,36 +34,10 @@ function classifyM3u8(url) {
   return 'master';
 }
 
-const ARABIC_MONTHS =
-  'يناير|فبراير|مارس|أبريل|إبريل|مايو|يونيو|يوليو|أغسطس|سبتمبر|أكتوبر|نوفمبر|ديسمبر';
-
-// Skip header lines (username, handle, timestamp) and any line that contains
-// a link ANYWHERE in it (quote-tweet/link-card previews put the URL inline,
-// not always as its own bare line) — dropping the whole line is safer than
-// trying to surgically remove just the link, since a partial removal can
-// leave a stray "](url)" fragment that breaks the markdown link we wrap the
-// title in later.
-const SKIP_LINE_PATTERNS = [
-  /^@[A-Za-z0-9_]+$/,                        // @username
-  /^\d+[KMB]?$/,                              // engagement counts
-  /^[\u0660-\u0669\d]+$/,                     // Arabic/Western digits only
-  /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s/i,
-  new RegExp(`^\\d{1,2}\\s+(${ARABIC_MONTHS})$`), // Arabic relative date, e.g. "12 يوليو"
-  /^\d{1,2}:\d{2}/,                           // timestamps
-  /^(ترو|انمي|True\s?Gaming|Anime\s?Therapy)/i, // display name lines (with/without space)
-  /https?:\/\//i,                             // any link, anywhere in the line
-  /[a-z0-9-]+\.(com|net|org)\/\S+/i,          // protocol-less links like "x.com/…/status/…"
-  /^[A-Z][a-z]+\s\d+$/,                       // "Jul 2" style dates
-];
-
-// Older tweets render the author name AND full date ("21 ديسمبر 2019") fused
-// onto the same innerText line as the tweet body itself (no newline between
-// them), so the whole-line skip above never fires — this strips just that
-// leading "name ... DD Month YYYY" prefix wherever it appears at the start
-// of the joined text, leaving the real tweet content intact.
-const LEADING_NAME_DATE_RE = new RegExp(
-  `^.{0,80}?\\d{1,2}\\s+(${ARABIC_MONTHS})\\s+\\d{4}\\s*`
-);
+// Any bare link left over inside the extracted tweet text (quote-tweet /
+// link-card previews sometimes render their URL as actual DOM text inside
+// tweetText, not just as a card) — stripped as a safety net.
+const BARE_LINK_RE = /https?:\/\/\S+/gi;
 
 async function withPage(browser, fn) {
   const page = await browser.newPage();
@@ -188,34 +162,72 @@ async function scrapeAccount(username, sourceKey) {
       // Give the SPA time to render tweets
       await new Promise((r) => setTimeout(r, 3000));
 
-      // X renders tweets in <article> elements — extract data from DOM
-      return page.evaluate((skipSources, dateRe) => {
-        const skipPatterns = skipSources.map((s) => new RegExp(s.source, s.flags));
-        const leadingNameDateRe = new RegExp(dateRe.source, dateRe.flags);
+      // X renders tweets in <article> elements. This environment is served
+      // X's schema.org-microdata markup (SEO/crawler-friendly SSR), which has
+      // NO `data-testid="tweetText"` spans at all — the tweet body instead
+      // sits whole, in logical reading order, inside a
+      // `<meta itemprop="text" content="…">` tag on the article.
+      //
+      // IMPORTANT: we deliberately do NOT reconstruct the tweet body from
+      // innerText/textContent of rendered spans. X splits Arabic (RTL) tweet
+      // text across many small nested inline elements (per-segment styling,
+      // mention/hashtag links, bidi isolation marks); when Arabic and
+      // Latin/emoji fragments sit in separate sibling elements, the browser's
+      // bidi reordering for *visual* layout can scramble the string handed
+      // back — characters/words come out interleaved or reversed. The
+      // `itemprop="text"` meta content is the raw source string X itself
+      // generated for crawlers, already in correct logical order with emoji
+      // intact, and already excludes the author/date header — no heuristic
+      // line-filtering needed.
+      return page.evaluate((linkReSource, linkReFlags, usernameArg) => {
+        const bareLinkRe = new RegExp(linkReSource, linkReFlags);
+
+        function extractTweetText(article) {
+          // First match in document order is the tweet's own text; a
+          // quoted/embedded tweet's meta (if any) renders further down
+          // inside the same article, so it's naturally excluded.
+          const textMeta = article.querySelector('meta[itemprop="text"]');
+          let raw = textMeta ? textMeta.getAttribute('content') : '';
+          if (!raw) {
+            // Fallback: articleBody is the same text but sometimes keeps the
+            // trailing t.co link(s) that "text" already strips.
+            const bodyMeta = article.querySelector('meta[itemprop="articleBody"]');
+            raw = bodyMeta ? bodyMeta.getAttribute('content') : '';
+          }
+          return (raw || '').replace(bareLinkRe, '').replace(/[ \t]{2,}/g, ' ').trim();
+        }
+
         const list = [];
         const seenIds = new Set(); // dedup within same page load
         document.querySelectorAll('article').forEach((article) => {
-          const allText = article.innerText || '';
-
-          const statusLinks = [...article.querySelectorAll('a[href*="/status/"]')];
-          const statusLink = statusLinks.find(
-            (a) => /\/status\/\d+$/.test(a.getAttribute('href') || '')
-          );
-          const href = statusLink ? statusLink.getAttribute('href') : '';
-          const id = (href.match(/\/status\/(\d+)/) || [])[1] || '';
+          // data-tweet-id lives directly on the article in this markup —
+          // more reliable than parsing it back out of a status link href.
+          // meta[itemprop="url"] gives the full canonical status URL when
+          // present; fall back to a status link, then to building it from
+          // the known account username.
+          let id = article.getAttribute('data-tweet-id') || '';
+          const urlMeta = article.querySelector('meta[itemprop="url"]');
+          let href = urlMeta
+            ? urlMeta.getAttribute('content').replace(/^https?:\/\/x\.com/, '')
+            : '';
+          if (!id || !href) {
+            const statusLinks = [...article.querySelectorAll('a[href*="/status/"]')];
+            const statusLink = statusLinks.find(
+              (a) => /\/status\/\d+$/.test(a.getAttribute('href') || '')
+            );
+            if (!href) href = statusLink ? statusLink.getAttribute('href') : '';
+            if (!id) id = (href.match(/\/status\/(\d+)/) || [])[1] || '';
+          }
+          if (!href && id) href = `/${usernameArg}/status/${id}`;
           if (!id) return;
           if (seenIds.has(id)) return; // skip duplicate articles (pinned + timeline)
           seenIds.add(id);
 
-          const lines = allText
-            .split('\n')
-            .map((l) => l.trim())
-            .filter((l) => l.length > 0);
-          const tweetLines = lines.filter(
-            (l) => l.length > 5 && !skipPatterns.some((p) => p.test(l))
-          );
-          const joined = tweetLines.join(' ').replace(leadingNameDateRe, '');
-          const text = joined.trim().slice(0, 500);
+          // Don't hard-slice here — a fixed 500-char cut chopped tweet text
+          // mid-word/mid-sentence for longer tweets, producing incomplete or
+          // garbled-looking titles. Keep the full raw text; discord.js applies
+          // a sentence/word-boundary-aware truncation at send time instead.
+          const text = extractTweetText(article);
 
           const avatarImg = article.querySelector('img[src*="profile_images"]');
           const authorAvatar = avatarImg ? avatarImg.src : '';
@@ -231,10 +243,7 @@ async function scrapeAccount(username, sourceKey) {
           if (text) list.push({ text, href, id, imgs, authorAvatar, hasVideo });
         });
         return list;
-      }, SKIP_LINE_PATTERNS.map((p) => ({ source: p.source, flags: p.flags })), {
-        source: LEADING_NAME_DATE_RE.source,
-        flags: LEADING_NAME_DATE_RE.flags,
-      }).catch(() => []);
+      }, BARE_LINK_RE.source, BARE_LINK_RE.flags, username).catch(() => []);
     });
 
     tweets = tweets.slice(0, 20);

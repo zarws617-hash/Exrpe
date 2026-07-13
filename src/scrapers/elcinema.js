@@ -7,6 +7,21 @@ const SOURCE_KEY = 'elcinema';
 const BASE_URL = 'https://elcinema.com';
 const NEWS_URL = `${BASE_URL}/ar/press/`;
 
+// The /ar/press/ listing is mostly Arabic articles about (often
+// English-titled) movies — e.g. "بدء التحضير لفيلم Ocean's Eleven" is a
+// legitimate Arabic article that just quotes an English movie name. But the
+// listing occasionally also carries a handful of fully English press items
+// (e.g. English-language industry pieces with no Arabic at all), which don't
+// belong on an Arabic news channel. Distinguish the two by requiring a real
+// share of Arabic script in the title rather than just "contains English",
+// since almost every title contains some Latin movie name.
+function isArabicEnough(text) {
+  const arabicChars = (text.match(/[\u0600-\u06FF]/g) || []).length;
+  const letterChars = (text.match(/[A-Za-z\u0600-\u06FF]/g) || []).length;
+  if (letterChars === 0) return false;
+  return arabicChars / letterChars >= 0.4;
+}
+
 async function scrape() {
   const results = [];
 
@@ -44,6 +59,7 @@ async function scrape() {
       '';
 
     if (!title || title.length < 5) return;
+    if (!isArabicEnough(title)) return;
 
     // Image from container
     const img =
