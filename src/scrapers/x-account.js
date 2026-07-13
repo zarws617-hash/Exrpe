@@ -11,12 +11,28 @@ function killBrowser(browser) {
   } catch { /* ignore */ }
 }
 
-// X serves tweet video as fragmented HLS: a "*.mp4" URL briefly appears on
-// the wire but it's only a small init segment, not the playable file — the
-// real content comes from separate video and audio .m3u8 playlists (each
-// referencing many .m4s fragments), which ffmpeg can download and mux.
-const VIDEO_PLAYLIST_RE = /twimg\.com\/.+\/pl\/(\d+)x(\d+)\/.+\.m3u8/i;
-const AUDIO_PLAYLIST_RE = /twimg\.com\/.+\/pl\/mp4a\/(\d+)\/.+\.m3u8/i;
+// X HLS video URL taxonomy:
+//   Master playlist   — .../pl/{hash}.m3u8          (no resolution, no mp4a)
+//   Video variant     — .../pl/{W}x{H}/{hash}.m3u8
+//   Audio variant     — .../pl/mp4a/{bitrate}/{hash}.m3u8
+//   GIF-type MP4      — tweet_video/{hash}.mp4       (short, progressive)
+//
+// Strategy: prefer the master playlist because it embeds EXT-X-MEDIA references
+// for the audio track, so ffmpeg downloads video + audio in one pass and we never
+// lose the audio stream.  Fall back to separate video/audio variants, then to a
+// plain MP4 for GIF clips.
+const MASTER_PLAYLIST_RE = /video\.twimg\.com\/.+\.m3u8/i; // catch-all; classified below
+const VIDEO_VARIANT_RE   = /\/pl\/(\d+)x(\d+)\//i;          // has WxH → video variant
+const AUDIO_VARIANT_RE   = /\/pl\/mp4a\//i;                  // has mp4a → audio variant
+const TWEET_VIDEO_MP4_RE = /video\.twimg\.com\/tweet_video\/.+\.mp4/i;
+
+/** Returns 'master' | 'video' | 'audio' | null for a twimg m3u8 URL. */
+function classifyM3u8(url) {
+  if (!MASTER_PLAYLIST_RE.test(url)) return null;
+  if (AUDIO_VARIANT_RE.test(url)) return 'audio';
+  if (VIDEO_VARIANT_RE.test(url))  return 'video';
+  return 'master';
+}
 
 const ARABIC_MONTHS =
   'يناير|فبراير|مارس|أبريل|إبريل|مايو|يونيو|يوليو|أغسطس|سبتمبر|أكتوبر|نوفمبر|ديسمبر';
@@ -68,7 +84,8 @@ async function configurePage(page, { allowVideo } = {}) {
   await page.setRequestInterception(true);
   page.on('request', (req) => {
     const u = req.url();
-    if (allowVideo && (VIDEO_PLAYLIST_RE.test(u) || AUDIO_PLAYLIST_RE.test(u))) {
+    // When collecting video URLs let all twimg m3u8 and mp4 requests through
+    if (allowVideo && (MASTER_PLAYLIST_RE.test(u) || TWEET_VIDEO_MP4_RE.test(u))) {
       req.continue();
       return;
     }
@@ -82,53 +99,77 @@ async function configurePage(page, { allowVideo } = {}) {
 }
 
 /**
- * Fetches the best (highest-res, video-not-audio) HLS playlists for a single
- * tweet by navigating directly to its own status page. Doing this in
- * isolation (one tweet per page load) avoids the ambiguity of matching
- * requests captured from a timeline where multiple videos can load/prefetch
- * interleaved.
+ * Fetches the video source for a single tweet status page.
+ *
+ * Priority (highest reliability first):
+ *   1. Master m3u8  — one URL, ffmpeg handles video + audio automatically via
+ *                     EXT-X-MEDIA; no risk of missing a separate audio fetch.
+ *   2. Video variant + audio variant — explicit two-stream mux.
+ *   3. Video variant alone — rare; some clips have no separate audio.
+ *   4. tweet_video MP4 — GIF-type short clips served as a plain progressive file.
  */
 async function fetchTweetVideoUrl(browser, tweetUrl) {
   return withPage(browser, async (page) => {
-    const videoPlaylists = [];
-    const audioPlaylists = [];
+    const masters  = [];
+    const videos   = [];
+    const audios   = [];
+    const mp4Urls  = [];
+
     await configurePage(page, { allowVideo: true });
     page.on('request', (req) => {
       const u = req.url();
-      if (VIDEO_PLAYLIST_RE.test(u)) videoPlaylists.push(u);
-      else if (AUDIO_PLAYLIST_RE.test(u)) audioPlaylists.push(u);
+      const kind = classifyM3u8(u);
+      if      (kind === 'master') masters.push(u);
+      else if (kind === 'video')  videos.push(u);
+      else if (kind === 'audio')  audios.push(u);
+      else if (TWEET_VIDEO_MP4_RE.test(u)) mp4Urls.push(u);
     });
 
     await page.goto(tweetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-    await new Promise((r) => setTimeout(r, 3500));
+    await new Promise((r) => setTimeout(r, 4000));
 
-    // If nothing loaded yet, nudge autoplay by scrolling the video into view.
-    if (videoPlaylists.length === 0) {
+    // Nothing captured yet — nudge the player and wait a bit longer
+    if (!masters.length && !videos.length && !mp4Urls.length) {
       await page.evaluate(() => {
         document.querySelector('video')?.scrollIntoView({ block: 'center' });
+        const btn = document.querySelector('[data-testid="playButton"], [aria-label*="Play"]');
+        if (btn) btn.click();
       }).catch(() => {});
-      await new Promise((r) => setTimeout(r, 2500));
+      await new Promise((r) => setTimeout(r, 4000));
     }
 
-    if (videoPlaylists.length === 0) return null;
-
-    // Prefer the highest resolution video playlist and highest bitrate audio.
-    videoPlaylists.sort((a, b) => {
-      const resOf = (u) => {
-        const m = u.match(VIDEO_PLAYLIST_RE);
-        return m ? parseInt(m[1], 10) * parseInt(m[2], 10) : 0;
-      };
-      return resOf(b) - resOf(a);
+    const sortVideos = () => videos.sort((a, b) => {
+      const res = (u) => { const m = u.match(VIDEO_VARIANT_RE); return m ? parseInt(m[1],10)*parseInt(m[2],10) : 0; };
+      return res(b) - res(a);
     });
-    audioPlaylists.sort((a, b) => {
-      const brOf = (u) => {
-        const m = u.match(AUDIO_PLAYLIST_RE);
-        return m ? parseInt(m[1], 10) : 0;
-      };
-      return brOf(b) - brOf(a);
+    const sortAudios = () => audios.sort((a, b) => {
+      const br = (u) => { const m = u.match(/\/mp4a\/(\d+)\//); return m ? parseInt(m[1],10) : 0; };
+      return br(b) - br(a);
     });
 
-    return { video: videoPlaylists[0], audio: audioPlaylists[0] || null };
+    console.log(`[x-video] masters=${masters.length} videos=${videos.length} audios=${audios.length} mp4s=${mp4Urls.length}`);
+
+    // 1. Explicit highest-res video + highest-bitrate audio — best quality control
+    if (videos.length && audios.length) {
+      sortVideos(); sortAudios();
+      return { video: videos[0], audio: audios[0], isMaster: false };
+    }
+
+    // 2. Master playlist — ffmpeg auto-selects the best variant (audio included)
+    if (masters.length) {
+      return { video: masters[0], audio: null, isMaster: true };
+    }
+
+    // 3. Video variant with no audio (rare)
+    if (videos.length) {
+      sortVideos();
+      return { video: videos[0], audio: null, isMaster: false };
+    }
+
+    // 4. GIF-type progressive MP4
+    if (mp4Urls.length) return mp4Urls[0];
+
+    return null;
   });
 }
 
@@ -152,6 +193,7 @@ async function scrapeAccount(username, sourceKey) {
         const skipPatterns = skipSources.map((s) => new RegExp(s.source, s.flags));
         const leadingNameDateRe = new RegExp(dateRe.source, dateRe.flags);
         const list = [];
+        const seenIds = new Set(); // dedup within same page load
         document.querySelectorAll('article').forEach((article) => {
           const allText = article.innerText || '';
 
@@ -162,6 +204,8 @@ async function scrapeAccount(username, sourceKey) {
           const href = statusLink ? statusLink.getAttribute('href') : '';
           const id = (href.match(/\/status\/(\d+)/) || [])[1] || '';
           if (!id) return;
+          if (seenIds.has(id)) return; // skip duplicate articles (pinned + timeline)
+          seenIds.add(id);
 
           const lines = allText
             .split('\n')
@@ -213,15 +257,22 @@ async function scrapeAccount(username, sourceKey) {
       }
     }
 
+    // Avatar via unavatar.io — more reliable than DOM extraction which
+    // breaks whenever X changes its lazy-loading or URL scheme.
+    const avatarUrl = `https://unavatar.io/x/${username}`;
+
     return fresh.map((t) => ({
-      title: t.text.slice(0, 120) + (t.text.length > 120 ? '…' : ''),
+      // Full tweet text as title — discord.js shows it as **bold** for X posts.
+      // No separate description to avoid the title+description duplication seen
+      // when both fields contain the same opening text.
+      title: t.text,
       url: `https://x.com${t.href}`,
-      description: t.text,
+      description: '',
       imageUrls: t.imgs,
       videoUrl: t.videoUrl || null,
       authorName: `@${username}`,
       authorUrl: `https://x.com/${username}`,
-      authorAvatarUrl: t.authorAvatar || null,
+      authorAvatarUrl: avatarUrl,
     }));
   } finally {
     killBrowser(browser);

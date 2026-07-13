@@ -1,6 +1,7 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { filterNew } = require('../storage');
+const { fetchArticleBody } = require('../fetchBody');
 
 const SOURCE_KEY = 'elcinema';
 const BASE_URL = 'https://elcinema.com';
@@ -56,7 +57,15 @@ async function scrape() {
     results.push({ title, url, description, imageUrls: img ? [img] : [] });
   });
 
-  return filterNew(SOURCE_KEY, results, (r) => r.url);
+  const fresh = filterNew(SOURCE_KEY, results, (r) => r.url);
+
+  for (const article of fresh) {
+    if (!article.description) {
+      article.description = await fetchArticleBody(article.url).catch(() => '');
+    }
+  }
+
+  return fresh;
 }
 
 module.exports = { scrape };

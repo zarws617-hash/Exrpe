@@ -2,6 +2,7 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const { launchBrowser } = require('../browser');
 const { filterNew } = require('../storage');
+const { extractBodyWithBrowser } = require('../fetchBody');
 
 const SOURCE_KEY = 'crunchyroll-manga';
 const PAGE_URL = 'https://www.crunchyroll.com/ar/news/manga';
@@ -102,7 +103,15 @@ async function scrapeWithBrowser() {
       return Object.values(byHref);
     }, BASE_URL, ARTICLE_RE.source);
 
-    results.push(...filterNew(SOURCE_KEY, articles, (a) => a.url));
+    const fresh = filterNew(SOURCE_KEY, articles, (a) => a.url);
+    results.push(...fresh);
+
+    // Fetch full article body using the same browser (Crunchyroll is SPA)
+    for (const article of fresh) {
+      if (!article.description) {
+        article.description = await extractBodyWithBrowser(browser, article.url).catch(() => '');
+      }
+    }
   } finally {
     await browser.close();
   }
@@ -122,7 +131,7 @@ async function scrapeWithRSS() {
     const item = $(el);
     const title = item.find('title').text().trim();
     const link = item.find('link').text().trim() || item.find('guid').text().trim();
-    const description = item.find('description').text().replace(/<[^>]+>/g, '').trim().slice(0, 300);
+    const description = item.find('description').text().replace(/<[^>]+>/g, '').trim();
     const img =
       item.find('media\\:thumbnail').attr('url') ||
       item.find('thumbnail').attr('url') ||
@@ -141,7 +150,15 @@ async function scrapeWithRSS() {
     results.push({ title, url: link, description, imageUrls: img ? [img] : [], _id: link || title });
   });
 
-  return filterNew(SOURCE_KEY, results, (r) => r._id);
+  const fresh = filterNew(SOURCE_KEY, results, (r) => r._id);
+
+  for (const article of fresh) {
+    if (!article.description) {
+      article.description = await fetchArticleBody(article.url).catch(() => '');
+    }
+  }
+
+  return fresh;
 }
 
 async function scrape() {

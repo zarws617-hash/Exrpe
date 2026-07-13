@@ -1,5 +1,6 @@
 const { launchBrowser } = require('../browser');
 const { filterNew } = require('../storage');
+const { extractBodyWithBrowser } = require('../fetchBody');
 
 const SOURCE_KEY = 'crunchyroll-anime';
 const PAGE_URL = 'https://www.crunchyroll.com/ar/news/latest';
@@ -79,13 +80,22 @@ async function scrape() {
       return results;
     }, BASE_URL, ARTICLE_RE.source);
 
-    results.push(...filterNew(SOURCE_KEY, articles, (a) => a.url));
+    const fresh = filterNew(SOURCE_KEY, articles, (a) => a.url);
+    results.push(...fresh);
 
-    console.log(`[crunchyroll-anime] Browser found ${articles.length} article(s), ${results.length} new`);
+    console.log(`[crunchyroll-anime] Browser found ${articles.length} article(s), ${fresh.length} new`);
+
+    // Fetch full article body using the same browser (Crunchyroll is SPA —
+    // axios returns an empty shell, browser rendering is required).
+    for (const article of fresh) {
+      if (!article.description) {
+        article.description = await extractBodyWithBrowser(browser, article.url).catch(() => '');
+      }
+    }
   } catch (e) {
     console.error('[crunchyroll-anime] Scrape failed:', e.message);
   } finally {
-    await browser.close();
+    await browser.close().catch(() => {});
   }
 
   return results;
