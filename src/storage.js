@@ -34,4 +34,41 @@ function isNew(scraperKey, id) {
   return true;
 }
 
-module.exports = { isNew };
+/**
+ * Bulk version of isNew for a whole scrape result.
+ *
+ * The FIRST time a given scraperKey is ever seen (no prior state on disk),
+ * every id found is recorded as seen but NONE are treated as "new" — this
+ * prevents the bot from dumping a backlog of old articles (weeks/months of
+ * history a page happens to list) as if they just happened. Only items
+ * discovered on later runs, after this baseline exists, are reported as new.
+ */
+function filterNew(scraperKey, items, getId) {
+  const data = load();
+  const isFirstRun = !data[scraperKey];
+  if (!data[scraperKey]) data[scraperKey] = [];
+
+  const seenSet = new Set(data[scraperKey]);
+  const fresh = [];
+
+  for (const item of items) {
+    const id = getId(item);
+    if (!id || seenSet.has(id)) continue;
+    seenSet.add(id);
+    data[scraperKey].push(id);
+    if (!isFirstRun) fresh.push(item);
+  }
+
+  if (data[scraperKey].length > 500) {
+    data[scraperKey] = data[scraperKey].slice(-500);
+  }
+  save(data);
+
+  if (isFirstRun && items.length > 0) {
+    console.log(`[storage] First run for "${scraperKey}" — seeded ${items.length} existing item(s) as seen, none posted`);
+  }
+
+  return fresh;
+}
+
+module.exports = { isNew, filterNew };
