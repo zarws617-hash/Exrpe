@@ -9,12 +9,12 @@ const elcinema = require('./scrapers/elcinema');
 
 // ── Channel IDs ───────────────────────────────────────────────────────────────
 const CHANNELS = {
-  crunchyrollManga: '';
-  crunchyrollAnime: '';
-  jistbuzz:         '';
-  truegaming:       '';
-  animetherapy:     '';
-  elcinema:         '';
+  crunchyrollManga: '1526090492574695486';
+  crunchyrollAnime: '1526090492574695486';
+  jistbuzz:         '1526090492574695486';
+  truegaming:       '1526090492574695486';
+  animetherapy:     '1526090492574695486';
+  elcinema:         '1526090492574695486';
 };
 
 // ── Channel accent colors ─────────────────────────────────────────────────────
