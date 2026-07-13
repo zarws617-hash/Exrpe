@@ -1,12 +1,15 @@
 const axios = require('axios');
 
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const API_BASE = 'https://discord.com/api/v10';
+
 /**
- * Sends a Discord Components V2 message to a webhook.
+ * Sends a Discord Components V2 message to a channel using the bot token.
  *
- * @param {string} webhookUrl
- * @param {object} payload - { title, url, description, imageUrls, authorName, authorUrl, authorIconUrl, color }
+ * @param {string} channelId
+ * @param {object} payload - { title, url, description, imageUrls, authorName, authorUrl, color }
  */
-async function sendNewsPost(webhookUrl, payload) {
+async function sendNewsPost(channelId, payload) {
   const {
     title,
     url,
@@ -14,7 +17,6 @@ async function sendNewsPost(webhookUrl, payload) {
     imageUrls = [],
     authorName,
     authorUrl,
-    authorIconUrl,
     color = 0xf47521,
   } = payload;
 
@@ -100,8 +102,11 @@ async function sendNewsPost(webhookUrl, payload) {
     ],
   };
 
-  await axios.post(webhookUrl, body, {
-    headers: { 'Content-Type': 'application/json' },
+  await axios.post(`${API_BASE}/channels/${channelId}/messages`, body, {
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bot ${BOT_TOKEN}`,
+    },
     timeout: 15000,
   });
 }
